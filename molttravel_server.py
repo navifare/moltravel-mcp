@@ -14,7 +14,12 @@ import asyncio
 import json
 import logging
 import os
+from typing import Any, Optional
+
+import pydantic
 from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp.tools.base import Tool
+from mcp.server.fastmcp.utilities.func_metadata import ArgModelBase, FuncMetadata
 
 from providers import MCP_PROVIDERS, get_country_info, get_travel_advice, list_fcdo_countries
 from providers import airports, airlines, visas
@@ -69,11 +74,50 @@ def _extract_text(result: dict) -> str:
     return "\n".join(parts) if parts else json.dumps(result, indent=2)
 
 
+_JSON_TYPE_MAP: dict[str, type] = {
+    "string": str,
+    "integer": int,
+    "number": float,
+    "boolean": bool,
+    "object": dict,
+    "array": list,
+}
+
+
+def _build_arg_model(tool_name: str, input_schema: dict) -> type[ArgModelBase]:
+    """Build a dynamic Pydantic model from a JSON Schema ``inputSchema``."""
+    properties = input_schema.get("properties", {})
+    required = set(input_schema.get("required", []))
+    fields: dict[str, Any] = {}
+
+    for prop_name, prop_schema in properties.items():
+        json_type = prop_schema.get("type", "string")
+        py_type = _JSON_TYPE_MAP.get(json_type, Any)
+        default = prop_schema.get("default", ...)
+
+        if prop_name not in required and default is ...:
+            py_type = Optional[py_type]
+            default = None
+
+        field_kwargs: dict[str, Any] = {}
+        if prop_schema.get("description"):
+            field_kwargs["description"] = prop_schema["description"]
+
+        fields[prop_name] = (py_type, pydantic.Field(default=default, **field_kwargs))
+
+    return pydantic.create_model(
+        f"{tool_name}_Args",
+        __base__=ArgModelBase,
+        **fields,
+    )
+
+
 def _register_mcp_tool(provider_name: str, tool_def: dict):
     """Register one upstream MCP tool on our server."""
     upstream_name = tool_def["name"]
     local_name = f"{provider_name}_{upstream_name}"
     description = tool_def.get("description", "")
+    input_schema = tool_def.get("inputSchema", {"type": "object", "properties": {}})
 
     async def handler(**kwargs) -> str:
         client = MCP_PROVIDERS[provider_name]
@@ -86,7 +130,20 @@ def _register_mcp_tool(provider_name: str, tool_def: dict):
     handler.__name__ = local_name
     handler.__doc__ = f"[{provider_name}] {description}"
 
-    server.tool(name=local_name, description=f"[{provider_name}] {description}")(handler)
+    # Build dynamic arg model from upstream inputSchema
+    arg_model = _build_arg_model(local_name, input_schema)
+    meta = FuncMetadata(arg_model=arg_model, wrap_output=False)
+
+    tool = Tool(
+        fn=handler,
+        name=local_name,
+        description=f"[{provider_name}] {description}",
+        parameters=input_schema,
+        fn_metadata=meta,
+        is_async=True,
+        context_kwarg=None,
+    )
+    server._tool_manager._tools[local_name] = tool
     log.info(f"Registered tool: {local_name}")
 
 

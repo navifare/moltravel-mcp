@@ -204,4 +204,5 @@ async def visa_summary(passport: str) -> str:
 
 async def get_visa_count() -> int:
     """Return loaded visa entry count (0 if not loaded)."""
+    await _ensure_loaded()
     return _data["count"] if _data else 0

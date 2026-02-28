@@ -154,4 +154,5 @@ async def search_airlines(
 
 async def get_airline_count() -> int:
     """Return loaded airline count (0 if not loaded)."""
+    await _ensure_loaded()
     return _data["count"] if _data else 0

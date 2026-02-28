@@ -249,4 +249,5 @@ async def airports_near(
 
 async def get_airport_count() -> int:
     """Return loaded airport count (0 if not loaded)."""
+    await _ensure_loaded()
     return _data["count"] if _data else 0
