@@ -13,6 +13,7 @@ Recommended agent flow for flights:
 import asyncio
 import json
 import logging
+import os
 from mcp.server.fastmcp import FastMCP
 
 from providers import MCP_PROVIDERS, get_country_info, get_travel_advice, list_fcdo_countries
@@ -23,6 +24,8 @@ log = logging.getLogger("molttravel")
 
 server = FastMCP(
     "molttravel",
+    host="0.0.0.0",
+    port=int(os.environ.get("PORT", 8000)),
     instructions=(
         "MoltTravel aggregates travel tools from multiple providers.\n\n"
         "Recommended flow for flights:\n"
@@ -261,6 +264,4 @@ async def data_status() -> str:
 discover_and_register()
 
 if __name__ == "__main__":
-    import os
-    port = int(os.environ.get("PORT", 8000))
-    server.run(transport="streamable-http", host="0.0.0.0", port=port)
+    server.run(transport="streamable-http")
