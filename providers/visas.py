@@ -12,6 +12,7 @@ from .data_loader import fetch_csv
 log = logging.getLogger("molttravel.visas")
 
 _URL = "https://raw.githubusercontent.com/ilyankou/passport-index-dataset/master/passport-index-tidy.csv"
+_COUNTRIES_URL = "https://davidmegginson.github.io/ourairports-data/countries.csv"
 
 # Common aliases → canonical names used in the dataset
 _ALIASES: dict[str, str] = {
@@ -41,27 +42,45 @@ _ALIASES: dict[str, str] = {
     "swaziland": "Eswatini",
 }
 
+# ISO 3166-1 alpha-2 → country name (populated at load time from OurAirports)
+_iso_to_name: dict[str, str] = {}
+
 _data: dict | None = None
 _lock = asyncio.Lock()
 
 
 def _resolve_country(name: str) -> str | None:
-    """Resolve a country input to the canonical name used in the dataset."""
+    """Resolve a country input to the canonical name used in the dataset.
+
+    Accepts full names, common aliases (USA, UK, UAE), and ISO 3166-1
+    alpha-2 codes (CH, JP, US).
+    """
     if not name:
         return None
     name_stripped = name.strip()
     name_lower = name_stripped.lower()
 
-    # 1. Check alias map
+    # 1. Check alias map (includes common shorthands like "usa", "uk")
     if name_lower in _ALIASES:
         return _ALIASES[name_lower]
 
-    # 2. Direct match (case-insensitive) against known countries
+    # 2. ISO 3166-1 alpha-2 code (2 uppercase letters)
+    name_upper = name_stripped.upper()
+    if len(name_upper) == 2 and name_upper.isalpha() and name_upper in _iso_to_name:
+        resolved = _iso_to_name[name_upper]
+        # Try to match the resolved name against the visa dataset's country list
+        if _data and _data["countries_lower"]:
+            resolved_lower = resolved.lower()
+            if resolved_lower in _data["countries_lower"]:
+                return _data["countries_lower"][resolved_lower]
+        return resolved
+
+    # 3. Direct match (case-insensitive) against known countries
     if _data and _data["countries_lower"]:
         if name_lower in _data["countries_lower"]:
             return _data["countries_lower"][name_lower]
 
-    # 3. Substring match
+    # 4. Substring match (only if unambiguous)
     if _data and _data["countries_lower"]:
         matches = [
             canonical
@@ -75,7 +94,7 @@ def _resolve_country(name: str) -> str | None:
 
 
 async def _ensure_loaded():
-    global _data
+    global _data, _iso_to_name
     if _data is not None:
         return
     async with _lock:
@@ -88,6 +107,18 @@ async def _ensure_loaded():
             log.warning(f"Failed to load visa data: {e}")
             _data = {"by_passport": {}, "countries_lower": {}, "count": 0}
             return
+
+        # Load ISO code → country name mapping from OurAirports
+        try:
+            countries_rows = await fetch_csv(_COUNTRIES_URL)
+            _iso_to_name = {
+                r["code"].strip().upper(): r["name"].strip()
+                for r in countries_rows
+                if r.get("code") and r.get("name")
+            }
+            log.info(f"Loaded {len(_iso_to_name)} ISO country codes")
+        except Exception as e:
+            log.warning(f"Failed to load ISO country codes: {e}")
 
         by_passport: dict[str, list[dict]] = {}
         all_countries: set[str] = set()
