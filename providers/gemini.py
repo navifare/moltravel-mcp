@@ -29,6 +29,14 @@ Rules:
 - For kiwi tools: dates must be dd/mm/yyyy.
 - Today's date: {today}
 
+Flight price-check workflow:
+When the user asks for flights, ALWAYS follow this sequence:
+1. Search flights with kiwi_search-flight.
+2. Pick the best result and format it with navifare_format_flight_pricecheck_request
+   (pass a natural-language summary: airline, flight number, airports, dates, times, price, currency, passengers, class).
+3. Run navifare_flight_pricecheck with the formatted output to compare prices across booking sites.
+This ensures the user sees the cheapest verified price, not just one provider's quote.
+
 User query: {query}"""
 
 
