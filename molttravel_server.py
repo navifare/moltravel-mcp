@@ -298,7 +298,8 @@ async def data_status() -> str:
 
 # -- travel_agent (LLM-routed master tool) --
 
-MAX_TOOL_CALLS = 5
+MAX_STEPS = 3
+MAX_TOOL_CALLS = 7
 TOOL_TIMEOUT = 30
 
 
@@ -330,6 +331,44 @@ async def _execute_tool(name: str, arguments: dict) -> str:
         return f"Error calling '{name}': {e}"
 
 
+def _normalize_plan(plan: list) -> list[list[dict]]:
+    """Normalize Gemini output into [[step1_calls], [step2_calls], ...].
+
+    Accepts both:
+      - Flat list of calls: [{"tool": ...}, ...]  (legacy, single step)
+      - Nested steps: [[{"tool": ...}], [{"tool": ...}]]
+    """
+    if not plan:
+        return []
+    # If first element is a list, it's already nested steps
+    if isinstance(plan[0], list):
+        return [step for step in plan if isinstance(step, list)]
+    # Flat list → wrap in single step
+    return [plan]
+
+
+import re
+
+_STEP_REF = re.compile(r"\$\{step\[(\d+)\]\.([^}]+)\}")
+
+
+def _resolve_refs(obj: object, history: list[dict[str, str]]) -> object:
+    """Recursively replace ${step[N].tool_name} placeholders with actual results."""
+    if isinstance(obj, str):
+        def _replace(m: re.Match) -> str:
+            step_idx = int(m.group(1))
+            tool_name = m.group(2)
+            if step_idx < len(history) and tool_name in history[step_idx]:
+                return history[step_idx][tool_name]
+            return m.group(0)  # leave unresolved refs as-is
+        return _STEP_REF.sub(_replace, obj)
+    if isinstance(obj, dict):
+        return {k: _resolve_refs(v, history) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_resolve_refs(v, history) for v in obj]
+    return obj
+
+
 # -- Startup --
 
 discover_and_register()
@@ -350,39 +389,58 @@ if gemini.GEMINI_API_KEY:
         manifest = _build_tools_manifest()
 
         try:
-            plan = await gemini.route_query(query, manifest)
+            raw_plan = await gemini.route_query(query, manifest)
         except ValueError as e:
             return f"Routing error: {e}"
         except Exception as e:
             return f"Failed to plan tool calls: {e}"
 
-        if not plan:
+        steps = _normalize_plan(raw_plan)
+        if not steps:
             return "I couldn't determine which tools to use for that query. Try being more specific."
 
-        # Cap at MAX_TOOL_CALLS
-        if len(plan) > MAX_TOOL_CALLS:
-            plan = plan[:MAX_TOOL_CALLS]
+        # Cap steps and total calls
+        steps = steps[:MAX_STEPS]
+        total = 0
+        for i, step in enumerate(steps):
+            remaining = MAX_TOOL_CALLS - total
+            if remaining <= 0:
+                steps = steps[:i]
+                break
+            steps[i] = step[:remaining]
+            total += len(steps[i])
 
-        # Validate tool names before executing
+        # Validate all tool names upfront
         valid_tools = set(server._tool_manager._tools.keys()) - {"travel_agent"}
-        for call in plan:
-            if call.get("tool") not in valid_tools:
-                return (
-                    f"Routing error: unknown tool '{call.get('tool')}'. "
-                    f"Available: {', '.join(sorted(valid_tools))}"
-                )
+        for step in steps:
+            for call in step:
+                if call.get("tool") not in valid_tools:
+                    return (
+                        f"Routing error: unknown tool '{call.get('tool')}'. "
+                        f"Available: {', '.join(sorted(valid_tools))}"
+                    )
 
-        # Execute all tool calls in parallel
-        tasks = [
-            _execute_tool(call["tool"], call.get("arguments", {}))
-            for call in plan
-        ]
-        results = await asyncio.gather(*tasks)
+        # Execute steps sequentially; calls within each step run in parallel
+        history: list[dict[str, str]] = []  # history[step_idx][tool_name] = result
+        sections: list[str] = []
 
-        # Combine results with section headers
-        sections = []
-        for call, result in zip(plan, results):
-            sections.append(f"## {call['tool']}\n{result}")
+        for step_idx, step in enumerate(steps):
+            # Resolve ${step[N].tool_name} references from previous steps
+            resolved_step = _resolve_refs(step, history)
+
+            tasks = [
+                _execute_tool(call["tool"], call.get("arguments", {}))
+                for call in resolved_step
+            ]
+            results = await asyncio.gather(*tasks)
+
+            step_results: dict[str, str] = {}
+            for call, result in zip(resolved_step, results):
+                tool_name = call["tool"]
+                step_results[tool_name] = result
+                sections.append(f"## {tool_name}\n{result}")
+
+            history.append(step_results)
 
         return "\n\n".join(sections)
 
