@@ -23,6 +23,7 @@ from mcp.server.fastmcp.utilities.func_metadata import ArgModelBase, FuncMetadat
 
 from providers import MCP_PROVIDERS, get_country_info, get_travel_advice, list_fcdo_countries
 from providers import airports, airlines, visas
+from providers import gemini
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("molttravel")
@@ -59,7 +60,10 @@ server = FastMCP(
         "- `fcdo_travel_advice` — get UK FCDO travel advice for a specific country\n"
         "- `fcdo_list_countries` — list all countries with FCDO travel advice\n"
         "- `data_status` — check which static datasets are loaded\n\n"
-        "All tools are prefixed with their provider name (e.g. kiwi_, navifare_, peek_, restcountries_, fcdo_)."
+        "All tools are prefixed with their provider name (e.g. kiwi_, navifare_, peek_, restcountries_, fcdo_).\n\n"
+        "Master tool:\n"
+        "- `travel_agent` — ask any travel question in natural language and it will "
+        "automatically route to the right tools and return a combined answer."
     ),
 )
 
@@ -74,37 +78,11 @@ def _extract_text(result: dict) -> str:
     return "\n".join(parts) if parts else json.dumps(result, indent=2)
 
 
-_JSON_TYPE_MAP: dict[str, type] = {
-    "string": str,
-    "integer": int,
-    "number": float,
-    "boolean": bool,
-    "object": dict,
-    "array": list,
-}
-
-
 def _build_arg_model(tool_name: str, input_schema: dict) -> type[ArgModelBase]:
-    """Build a dynamic Pydantic model from a JSON Schema ``inputSchema``."""
-    properties = input_schema.get("properties", {})
-    required = set(input_schema.get("required", []))
+    """Build a permissive arg model — upstream MCP servers validate their own schemas."""
     fields: dict[str, Any] = {}
-
-    for prop_name, prop_schema in properties.items():
-        json_type = prop_schema.get("type", "string")
-        py_type = _JSON_TYPE_MAP.get(json_type, Any)
-        default = prop_schema.get("default", ...)
-
-        if prop_name not in required and default is ...:
-            py_type = Optional[py_type]
-            default = None
-
-        field_kwargs: dict[str, Any] = {}
-        if prop_schema.get("description"):
-            field_kwargs["description"] = prop_schema["description"]
-
-        fields[prop_name] = (py_type, pydantic.Field(default=default, **field_kwargs))
-
+    for prop_name in input_schema.get("properties", {}):
+        fields[prop_name] = (Any, pydantic.Field(default=None))
     return pydantic.create_model(
         f"{tool_name}_Args",
         __base__=ArgModelBase,
@@ -120,10 +98,12 @@ def _register_mcp_tool(provider_name: str, tool_def: dict):
     input_schema = tool_def.get("inputSchema", {"type": "object", "properties": {}})
 
     async def handler(**kwargs) -> str:
+        # Strip None values so upstream sees absent fields (not null)
+        cleaned = {k: v for k, v in kwargs.items() if v is not None}
         client = MCP_PROVIDERS[provider_name]
         loop = asyncio.get_event_loop()
         result = await loop.run_in_executor(
-            None, client.call_tool, upstream_name, kwargs
+            None, client.call_tool, upstream_name, cleaned
         )
         return _extract_text(result)
 
@@ -316,9 +296,99 @@ async def data_status() -> str:
     return "\n".join(lines)
 
 
+# -- travel_agent (LLM-routed master tool) --
+
+MAX_TOOL_CALLS = 5
+TOOL_TIMEOUT = 30
+
+
+def _build_tools_manifest() -> list[dict]:
+    """Build a manifest of all registered tools, excluding travel_agent itself."""
+    manifest = []
+    for name, tool in server._tool_manager._tools.items():
+        if name == "travel_agent":
+            continue
+        manifest.append({
+            "name": name,
+            "description": tool.description or "",
+            "parameters": tool.parameters or {"type": "object", "properties": {}},
+        })
+    return manifest
+
+
+async def _execute_tool(name: str, arguments: dict) -> str:
+    """Execute a single tool by name with a timeout."""
+    tool = server._tool_manager._tools.get(name)
+    if tool is None:
+        return f"Error: unknown tool '{name}'"
+    try:
+        result = await asyncio.wait_for(tool.fn(**arguments), timeout=TOOL_TIMEOUT)
+        return str(result) if result is not None else "(no output)"
+    except asyncio.TimeoutError:
+        return f"Error: tool '{name}' timed out after {TOOL_TIMEOUT}s"
+    except Exception as e:
+        return f"Error calling '{name}': {e}"
+
+
 # -- Startup --
 
 discover_and_register()
+
+
+# Register travel_agent after MCP discovery so all tools are available
+if gemini.GEMINI_API_KEY:
+    @server.tool(
+        name="travel_agent",
+        description=(
+            "Ask a travel question in natural language. "
+            "Routes to the right tools automatically and returns a combined answer. "
+            "Example: 'Cheapest flights from Zurich to Rome next week, and do I need a visa?'"
+        ),
+    )
+    async def travel_agent(query: str) -> str:
+        """Natural-language travel assistant that routes queries to the right tools."""
+        manifest = _build_tools_manifest()
+
+        try:
+            plan = await gemini.route_query(query, manifest)
+        except ValueError as e:
+            return f"Routing error: {e}"
+        except Exception as e:
+            return f"Failed to plan tool calls: {e}"
+
+        if not plan:
+            return "I couldn't determine which tools to use for that query. Try being more specific."
+
+        # Cap at MAX_TOOL_CALLS
+        if len(plan) > MAX_TOOL_CALLS:
+            plan = plan[:MAX_TOOL_CALLS]
+
+        # Validate tool names before executing
+        valid_tools = set(server._tool_manager._tools.keys()) - {"travel_agent"}
+        for call in plan:
+            if call.get("tool") not in valid_tools:
+                return (
+                    f"Routing error: unknown tool '{call.get('tool')}'. "
+                    f"Available: {', '.join(sorted(valid_tools))}"
+                )
+
+        # Execute all tool calls in parallel
+        tasks = [
+            _execute_tool(call["tool"], call.get("arguments", {}))
+            for call in plan
+        ]
+        results = await asyncio.gather(*tasks)
+
+        # Combine results with section headers
+        sections = []
+        for call, result in zip(plan, results):
+            sections.append(f"## {call['tool']}\n{result}")
+
+        return "\n\n".join(sections)
+
+    log.info("Registered tool: travel_agent (Gemini-routed)")
+else:
+    log.info("GEMINI_API_KEY not set — travel_agent tool not registered")
 
 if __name__ == "__main__":
     server.run(transport="streamable-http")
