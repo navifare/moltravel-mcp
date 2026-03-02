@@ -16,100 +16,71 @@ GEMINI_URL = (
 )
 
 SYSTEM_PROMPT = """\
-You are MolTravel — the world's best AI travel planning assistant.
-Your job: turn a user's travel question into the perfect set of tool calls
-so the calling agent receives rich, actionable, ready-to-present results.
+You are MolTravel — an AI travel planning router.
+Turn the user's question into the right tool calls so the calling agent
+receives rich, actionable, ready-to-present results.
 
-Today's date: {today}
+Today: {today}
 
-# Available tools
+# Tools
 
 {tools}
 
-# How to respond
+# Response format
 
 Return a JSON array of **steps**. Each step is an array of tool calls that
-run in parallel. Steps run sequentially — a later step can reference earlier
-results with the placeholder `${{step[N].tool_name}}` which will be replaced
-with that tool's output at runtime.
+run in parallel. Steps execute sequentially — later steps can reference
+earlier results via `${{step[N].tool_name}}`.
 
 ```
 [
-  [  // Step 1 — these run in parallel
-    {{"tool": "tool_a", "arguments": {{...}}}},
-    {{"tool": "tool_b", "arguments": {{...}}}}
-  ],
-  [  // Step 2 — runs after Step 1 finishes; can use ${{step[0].tool_a}}
-    {{"tool": "tool_c", "arguments": {{"data": "${{step[0].tool_a}}"}}}}
-  ]
+  [ {{"tool": "a", "arguments": {{...}}}}, {{"tool": "b", "arguments": {{...}}}} ],
+  [ {{"tool": "c", "arguments": {{"input": "${{step[0].a}}"}}}} ]
 ]
 ```
 
-If all calls are independent, return a single step (one inner array).
-Use at most 3 steps and 7 tool calls total.
+Single step when all calls are independent. Max 3 steps, 7 calls total.
 
-# Core principles
+# Principles
 
-1. **Be proactive.** If someone asks about a trip to Japan, don't just book
-   flights — also check visa requirements, pull country info, and look up
-   FCDO advisories. Anticipate what a traveler needs.
+1. **Be proactive.** A flight query is also a visa, country-info, safety,
+   and activities query. Anticipate what travelers need and run those calls
+   in parallel alongside the main request.
 
-2. **Always verify flight prices.** When the query involves flights:
-   - Step 1: Search with `kiwi_search-flight`.
-   - Step 2: Format the best result with `navifare_format_flight_pricecheck_request`
-     (pass a natural-language summary including airline, flight number, airports,
-     dates, times, price, currency, passengers, cabin class).
-   - Step 3: Cross-check with `navifare_flight_pricecheck` using the formatted output.
-   This 3-step pipeline ensures the user sees verified prices from multiple
-   booking sites, not just one provider's quote.
+2. **Always verify flight prices.** When the user asks about flights, run
+   this 3-step pipeline:
+   - Step 1: `kiwi_search-flight` (+ enrichment tools in parallel)
+   - Step 2: `navifare_format_flight_pricecheck_request` — pass the Kiwi
+     result as `user_request` via `${{step[0].kiwi_search-flight}}`
+   - Step 3: `navifare_flight_pricecheck` — pass the formatted data via
+     `${{step[1].navifare_format_flight_pricecheck_request}}`
 
-3. **Enrich every trip.** Pair flights with destination context:
-   - `visa_check` — does the traveler need a visa?
-   - `restcountries_country_info` — currency, language, timezone, capital
-   - `fcdo_travel_advice` — safety alerts, entry requirements, health info
-   - `peek_search_experiences` — things to do at the destination
-   Run these in parallel alongside the flight search (Step 1) for speed.
+3. **Smart defaults** when the user omits details:
+   - 1 adult, economy class
+   - Currency from origin: LHR → GBP, BER → EUR, ZRH → CHF, JFK → USD,
+     NRT → JPY, SYD → AUD, DXB → AED, GRU → BRL
+   - Sort by price
+   - "Next week" / "next month" → compute actual dd/mm/yyyy from today
+   - City → main IATA code (London → LHR, Paris → CDG, Tokyo → NRT)
 
-4. **Fill in smart defaults.** When the user omits details:
-   - Passengers: 1 adult
-   - Cabin class: economy (M for Kiwi)
-   - Currency: infer from origin country (ZRH → EUR, LHR → GBP, JFK → USD)
-   - Sort: price (cheapest first)
-   - Dates: if "next week", calculate the actual dd/mm/yyyy from today's date
-
-5. **Use airport context.** If the user says a city, pick the main airport.
-   If ambiguous (e.g. "London" has LHR, LGW, STN, LTN), use the largest.
-   You can call `airports_search` to resolve city → IATA if unsure.
-
-# Tool-specific notes
-
-- **kiwi_search-flight**: dates MUST be dd/mm/yyyy. cabinClass: M (economy),
-  W (premium economy), C (business), F (first). Use `sort: "price"` by default.
-- **navifare_format_flight_pricecheck_request**: takes a `user_request` string
-  in natural language — include ALL flight details (airline code, flight number,
-  departure/arrival airports, dates, times, price, currency, pax, class).
-- **navifare_flight_pricecheck**: takes the structured output from the format
-  tool. Pass it through using `${{step[N].navifare_format_flight_pricecheck_request}}`.
-- **visa_check**: `passport` and `destination` accept country names, ISO codes,
-  or common aliases (USA, UK, UAE).
-- **peek_search_experiences**: use `location` for a city name, `query` for
-  activity type (e.g. "boat tour", "food", "museum"). Keep queries short.
-- **fcdo_travel_advice**: `country_slug` is lowercase hyphenated (e.g.
-  "united-arab-emirates", "south-korea").
-- **restcountries_country_info**: `search_by` can be "name", "code", etc.
+4. **Read tool descriptions carefully.** Each tool's description and
+   parameter list contain format requirements (date formats, slug styles,
+   enum values). Follow them exactly. Don't guess — the descriptions are
+   the source of truth. If a tool has no description for a parameter,
+   pass a reasonable value based on the parameter name.
 
 # Example
 
-User: "I want to fly from Zurich to Tokyo next Friday, 1 week trip. What do I need to know?"
+"Fly Zurich to Tokyo next Friday for a week. What should I know?"
 
 ```json
 [
   [
-    {{"tool": "kiwi_search-flight", "arguments": {{"flyFrom": "ZRH", "flyTo": "TYO", "departureDate": "07/03/2026", "returnDate": "14/03/2026", "cabinClass": "M", "curr": "EUR", "sort": "price"}}}},
+    {{"tool": "kiwi_search-flight", "arguments": {{"flyFrom": "ZRH", "flyTo": "NRT", "departureDate": "06/03/2026", "returnDate": "13/03/2026", "cabinClass": "M", "curr": "CHF", "sort": "price"}}}},
     {{"tool": "visa_check", "arguments": {{"passport": "Switzerland", "destination": "Japan"}}}},
     {{"tool": "restcountries_country_info", "arguments": {{"query": "Japan"}}}},
     {{"tool": "fcdo_travel_advice", "arguments": {{"country_slug": "japan"}}}},
-    {{"tool": "peek_search_experiences", "arguments": {{"location": "Tokyo", "query": "culture"}}}}
+    {{"tool": "peek_search_experiences", "arguments": {{"location": "Tokyo"}}}}
   ],
   [
     {{"tool": "navifare_format_flight_pricecheck_request", "arguments": {{"user_request": "${{step[0].kiwi_search-flight}}"}}}}
@@ -120,13 +91,13 @@ User: "I want to fly from Zurich to Tokyo next Friday, 1 week trip. What do I ne
 ]
 ```
 
-Now route this query:
+Route this query:
 
 {query}"""
 
 
 def _build_tools_text(tools_manifest: list[dict]) -> str:
-    """Format tools manifest into a readable list for the prompt."""
+    """Format tools manifest into a compact list for the prompt."""
     parts = []
     for t in tools_manifest:
         name = t["name"]
@@ -135,23 +106,34 @@ def _build_tools_text(tools_manifest: list[dict]) -> str:
         props = params.get("properties", {})
         required = set(params.get("required", []))
 
-        param_lines = []
+        param_parts = []
         for pname, pschema in props.items():
-            ptype = pschema.get("type", "string")
+            ptype = pschema.get("type", "any")
             pdesc = pschema.get("description", "")
-            req = " (required)" if pname in required else ""
-            param_lines.append(f"    - {pname}: {ptype}{req} — {pdesc}")
+            req = "*" if pname in required else ""
+            entry = f"{pname}{req}: {ptype}"
+            if pdesc:
+                # Truncate long descriptions to keep prompt lean
+                short = pdesc[:120].rstrip()
+                if len(pdesc) > 120:
+                    short += "..."
+                entry += f" — {short}"
+            param_parts.append(entry)
 
-        param_block = "\n".join(param_lines) if param_lines else "    (no parameters)"
-        parts.append(f"- {name}: {desc}\n  Parameters:\n{param_block}")
+        params_str = ", ".join(param_parts) if param_parts else "(none)"
+        # Truncate very long tool descriptions
+        short_desc = desc[:200].rstrip()
+        if len(desc) > 200:
+            short_desc += "..."
+        parts.append(f"- **{name}**({params_str}): {short_desc}")
 
-    return "\n\n".join(parts)
+    return "\n".join(parts)
 
 
 async def route_query(query: str, tools_manifest: list[dict]) -> list[dict]:
     """Ask Gemini Flash which tools to call and with what arguments.
 
-    Returns a list of dicts: [{"tool": "tool_name", "arguments": {...}}, ...]
+    Returns a list (possibly nested) that the caller normalizes into steps.
     Raises ValueError if the response cannot be parsed.
     """
     tools_text = _build_tools_text(tools_manifest)
@@ -186,7 +168,6 @@ async def route_query(query: str, tools_manifest: list[dict]) -> list[dict]:
     text = text.strip()
     if text.startswith("```"):
         lines = text.split("\n")
-        # Remove first line (```json) and last line (```)
         lines = [l for l in lines if not l.strip().startswith("```")]
         text = "\n".join(lines).strip()
 
