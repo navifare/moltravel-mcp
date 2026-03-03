@@ -8,5 +8,6 @@ MCP_PROVIDERS = {
     "kiwi": McpClient("https://mcp.kiwi.com/mcp"),
     "navifare": McpClient("https://mcp.navifare.com/mcp"),
     "peek": McpClient("https://mcp.peek.com/mcp"),
+    "tourradar": McpClient("https://ai.tourradar.com/mcp/main"),
     "lastminute": McpClient("https://mcp.lastminute.com/mcp"),
 }
