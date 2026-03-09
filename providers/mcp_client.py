@@ -1,11 +1,14 @@
 """Generic MCP client — handles handshake, session, and tool calls for any MCP server."""
 
 import json
+import logging
 import uuid
 import ssl
 import time
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError
+
+log = logging.getLogger("molttravel.mcp")
 
 
 class McpClient:
@@ -20,6 +23,8 @@ class McpClient:
     # -- low-level transport --
 
     def _post(self, data: dict, headers: dict | None = None, retries: int = 3) -> tuple[str, dict]:
+        method = data.get("method", "unknown")
+        log.info("→ %s %s %s", method, self.url, json.dumps(data, default=str))
         body = json.dumps(data).encode("utf-8")
         for attempt in range(retries):
             try:
@@ -30,13 +35,18 @@ class McpClient:
                     for k, v in headers.items():
                         req.add_header(k, v)
                 with urlopen(req, timeout=self.timeout, context=self._ctx) as resp:
-                    return resp.read().decode("utf-8"), dict(resp.headers)
+                    resp_body = resp.read().decode("utf-8")
+                    resp_headers = dict(resp.headers)
+                    log.info("← %s %s %d %s", method, self.url, resp.status, resp_body[:2000])
+                    return resp_body, resp_headers
             except HTTPError as e:
+                log.warning("✗ %s %s HTTP %d (attempt %d/%d)", method, self.url, e.code, attempt + 1, retries)
                 if attempt < retries - 1 and e.code in (502, 503, 504):
                     time.sleep(2 ** attempt)
                     continue
                 raise
-            except Exception:
+            except Exception as e:
+                log.warning("✗ %s %s %s (attempt %d/%d)", method, self.url, e, attempt + 1, retries)
                 if attempt < retries - 1:
                     time.sleep(2 ** attempt)
                     continue
