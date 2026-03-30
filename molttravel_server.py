@@ -29,18 +29,30 @@ logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("molttravel")
 client_log = logging.getLogger("molttravel.clients")
 
+from dashboard import record_event, handle_dashboard_request
+
 # Track client info by MCP session ID
 _sessions: dict[str, dict] = {}
 
 
 class ClientTrackingMiddleware:
-    """ASGI middleware that logs MCP client identity and tool calls."""
+    """ASGI middleware that logs MCP client identity and tool calls,
+    records events to Postgres, and serves the analytics dashboard."""
 
     def __init__(self, app):
         self.app = app
 
     async def __call__(self, scope, receive, send):
-        if scope["type"] != "http" or scope["method"] != "POST":
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+
+        path = scope.get("path", "")
+
+        # Route /analytics/* to dashboard handler
+        if path.startswith("/analytics"):
+            return await handle_dashboard_request(scope, receive, send)
+
+        if scope["method"] != "POST":
             return await self.app(scope, receive, send)
 
         # Buffer the full request body so we can inspect it and replay it
@@ -79,18 +91,21 @@ class ClientTrackingMiddleware:
                 "NEW SESSION ip=%s client=%s/%s protocol=%s ua=%s",
                 client_ip, client_name, client_version, proto_version, user_agent,
             )
-            # Store for later correlation (will be keyed by session ID from response)
             _sessions[f"pending:{client_ip}"] = {
                 "client_name": client_name,
                 "client_version": client_version,
                 "ip": client_ip,
                 "ua": user_agent,
             }
+            asyncio.create_task(record_event(
+                "initialize", client_ip=client_ip, client_name=client_name,
+                client_version=client_version, user_agent=user_agent,
+                protocol_version=proto_version,
+            ))
 
         elif method == "tools/call":
             tool_name = params.get("name", "?")
             args = params.get("arguments", {})
-            # Look up session info
             sess = _sessions.get(session_id, _sessions.get(f"pending:{client_ip}", {}))
             client_name = sess.get("client_name", "unknown")
             client_log.info(
@@ -98,6 +113,12 @@ class ClientTrackingMiddleware:
                 client_ip, client_name, session_id[:16] if session_id else "none",
                 tool_name, json.dumps(args, default=str)[:200],
             )
+            asyncio.create_task(record_event(
+                "tool_call", client_ip=client_ip, client_name=client_name,
+                client_version=sess.get("client_version", ""),
+                user_agent=sess.get("ua", user_agent), session_id=session_id,
+                tool_name=tool_name, tool_args=args,
+            ))
 
         elif method == "tools/list":
             sess = _sessions.get(session_id, _sessions.get(f"pending:{client_ip}", {}))
@@ -106,6 +127,11 @@ class ClientTrackingMiddleware:
                 "TOOLS LIST ip=%s client=%s session=%s",
                 client_ip, client_name, session_id[:16] if session_id else "none",
             )
+            asyncio.create_task(record_event(
+                "tools_list", client_ip=client_ip, client_name=client_name,
+                client_version=sess.get("client_version", ""),
+                user_agent=sess.get("ua", user_agent), session_id=session_id,
+            ))
 
         # Capture session ID from response headers to link to pending session
         captured_session_id = None
@@ -116,7 +142,6 @@ class ClientTrackingMiddleware:
                 for name_bytes, val_bytes in message.get("headers", []):
                     if name_bytes.lower() == b"mcp-session-id":
                         captured_session_id = val_bytes.decode()
-                        # Move pending session to proper key
                         pending_key = f"pending:{client_ip}"
                         if pending_key in _sessions:
                             _sessions[captured_session_id] = _sessions.pop(pending_key)
