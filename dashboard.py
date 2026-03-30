@@ -4,7 +4,7 @@ import asyncio
 import json
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 log = logging.getLogger("molttravel.dashboard")
 
@@ -88,9 +88,9 @@ async def query_events(days: int = 7, limit: int = 200) -> list[dict]:
             """SELECT id, ts, event_type, client_ip, client_name, client_version,
                       user_agent, session_id, tool_name, tool_args
                FROM client_events
-               WHERE ts > NOW() - INTERVAL '1 day' * $1
+               WHERE ts > NOW() - $1::interval
                ORDER BY ts DESC LIMIT $2""",
-            days, limit,
+            timedelta(days=days), limit,
         )
         return [
             {
@@ -114,37 +114,37 @@ async def query_stats(days: int = 7) -> dict:
     if not pool:
         return {}
     async with pool.acquire() as conn:
-        interval = f"{days} days"
+        delta = timedelta(days=days)
 
         total = await conn.fetchval(
-            "SELECT COUNT(*) FROM client_events WHERE ts > NOW() - $1::interval", interval
+            "SELECT COUNT(*) FROM client_events WHERE ts > NOW() - $1::interval", delta
         )
         sessions = await conn.fetchval(
-            "SELECT COUNT(*) FROM client_events WHERE event_type='initialize' AND ts > NOW() - $1::interval", interval
+            "SELECT COUNT(*) FROM client_events WHERE event_type='initialize' AND ts > NOW() - $1::interval", delta
         )
         tool_calls = await conn.fetchval(
-            "SELECT COUNT(*) FROM client_events WHERE event_type='tool_call' AND ts > NOW() - $1::interval", interval
+            "SELECT COUNT(*) FROM client_events WHERE event_type='tool_call' AND ts > NOW() - $1::interval", delta
         )
 
         by_client = await conn.fetch(
             """SELECT client_name, COUNT(*) as cnt
                FROM client_events WHERE event_type='initialize' AND ts > NOW() - $1::interval
-               GROUP BY client_name ORDER BY cnt DESC LIMIT 20""", interval
+               GROUP BY client_name ORDER BY cnt DESC LIMIT 20""", delta
         )
         by_tool = await conn.fetch(
             """SELECT tool_name, COUNT(*) as cnt
                FROM client_events WHERE event_type='tool_call' AND ts > NOW() - $1::interval
-               GROUP BY tool_name ORDER BY cnt DESC LIMIT 20""", interval
+               GROUP BY tool_name ORDER BY cnt DESC LIMIT 20""", delta
         )
         by_day = await conn.fetch(
             """SELECT DATE(ts) as day, COUNT(*) FILTER (WHERE event_type='initialize') as sessions,
                       COUNT(*) FILTER (WHERE event_type='tool_call') as tool_calls
                FROM client_events WHERE ts > NOW() - $1::interval
-               GROUP BY DATE(ts) ORDER BY day""", interval
+               GROUP BY DATE(ts) ORDER BY day""", delta
         )
         unique_ips = await conn.fetchval(
             """SELECT COUNT(DISTINCT client_ip)
-               FROM client_events WHERE event_type='initialize' AND ts > NOW() - $1::interval""", interval
+               FROM client_events WHERE event_type='initialize' AND ts > NOW() - $1::interval""", delta
         )
 
         return {
@@ -252,7 +252,8 @@ let activityChart, clientChart;
 async function api(path) {
   const days = document.getElementById('days').value;
   const res = await fetch(`/analytics/api/${path}?days=${days}&key=${KEY}`);
-  if (!res.ok) { document.body.innerHTML = '<div class="p-12 text-center text-red-400 text-lg">Unauthorized</div>'; throw new Error('unauthorized'); }
+  if (res.status === 401) { document.body.innerHTML = '<div class="p-12 text-center text-red-400 text-lg">Unauthorized</div>'; throw new Error('unauthorized'); }
+  if (!res.ok) { const err = await res.json().catch(()=>({})); console.error('API error:', err); throw new Error(err.error || 'server error'); }
   return res.json();
 }
 
@@ -374,25 +375,41 @@ async def handle_dashboard_request(scope, receive, send):
         await send({"type": "http.response.body", "body": body})
 
     elif path == "/analytics/api/stats":
-        days = int(params.get("days", "7"))
-        stats = await query_stats(days=days)
-        body = json.dumps(stats).encode()
-        await send({"type": "http.response.start", "status": 200, "headers": [
-            [b"content-type", b"application/json"],
-            [b"content-length", str(len(body)).encode()],
-        ]})
-        await send({"type": "http.response.body", "body": body})
+        try:
+            days = int(params.get("days", "7"))
+            stats = await query_stats(days=days)
+            body = json.dumps(stats).encode()
+            await send({"type": "http.response.start", "status": 200, "headers": [
+                [b"content-type", b"application/json"],
+                [b"content-length", str(len(body)).encode()],
+            ]})
+            await send({"type": "http.response.body", "body": body})
+        except Exception as e:
+            log.exception("Dashboard stats error")
+            body = json.dumps({"error": str(e)}).encode()
+            await send({"type": "http.response.start", "status": 500, "headers": [
+                [b"content-type", b"application/json"],
+            ]})
+            await send({"type": "http.response.body", "body": body})
 
     elif path == "/analytics/api/events":
-        days = int(params.get("days", "7"))
-        limit = min(int(params.get("limit", "200")), 500)
-        events = await query_events(days=days, limit=limit)
-        body = json.dumps(events).encode()
-        await send({"type": "http.response.start", "status": 200, "headers": [
-            [b"content-type", b"application/json"],
-            [b"content-length", str(len(body)).encode()],
-        ]})
-        await send({"type": "http.response.body", "body": body})
+        try:
+            days = int(params.get("days", "7"))
+            limit = min(int(params.get("limit", "200")), 500)
+            events = await query_events(days=days, limit=limit)
+            body = json.dumps(events).encode()
+            await send({"type": "http.response.start", "status": 200, "headers": [
+                [b"content-type", b"application/json"],
+                [b"content-length", str(len(body)).encode()],
+            ]})
+            await send({"type": "http.response.body", "body": body})
+        except Exception as e:
+            log.exception("Dashboard events error")
+            body = json.dumps({"error": str(e)}).encode()
+            await send({"type": "http.response.start", "status": 500, "headers": [
+                [b"content-type", b"application/json"],
+            ]})
+            await send({"type": "http.response.body", "body": body})
 
     else:
         await send({"type": "http.response.start", "status": 404, "headers": [
