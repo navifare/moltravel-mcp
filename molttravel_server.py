@@ -27,6 +27,112 @@ from providers import gemini
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("molttravel")
+client_log = logging.getLogger("molttravel.clients")
+
+# Track client info by MCP session ID
+_sessions: dict[str, dict] = {}
+
+
+class ClientTrackingMiddleware:
+    """ASGI middleware that logs MCP client identity and tool calls."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http" or scope["method"] != "POST":
+            return await self.app(scope, receive, send)
+
+        # Buffer the full request body so we can inspect it and replay it
+        first_msg = await receive()
+        body = first_msg.get("body", b"")
+        more_body = first_msg.get("more_body", False)
+        all_body = bytearray(body)
+        while more_body:
+            msg = await receive()
+            all_body.extend(msg.get("body", b""))
+            more_body = msg.get("more_body", False)
+
+        # Extract client info from headers
+        headers = dict(scope.get("headers", []))
+        user_agent = headers.get(b"user-agent", b"").decode("utf-8", errors="replace")
+        # Get client IP from x-forwarded-for (Render proxy) or ASGI scope
+        forwarded = headers.get(b"x-forwarded-for", b"").decode()
+        client_ip = forwarded.split(",")[0].strip() if forwarded else (scope.get("client", [""])[0] or "")
+        session_id = headers.get(b"mcp-session-id", b"").decode()
+
+        # Parse JSON-RPC to identify the method
+        try:
+            payload = json.loads(bytes(all_body))
+            method = payload.get("method", "")
+            params = payload.get("params", {})
+        except (json.JSONDecodeError, AttributeError):
+            method = ""
+            params = {}
+
+        if method == "initialize":
+            client_info = params.get("clientInfo", {})
+            client_name = client_info.get("name", "unknown")
+            client_version = client_info.get("version", "?")
+            proto_version = params.get("protocolVersion", "?")
+            client_log.info(
+                "NEW SESSION ip=%s client=%s/%s protocol=%s ua=%s",
+                client_ip, client_name, client_version, proto_version, user_agent,
+            )
+            # Store for later correlation (will be keyed by session ID from response)
+            _sessions[f"pending:{client_ip}"] = {
+                "client_name": client_name,
+                "client_version": client_version,
+                "ip": client_ip,
+                "ua": user_agent,
+            }
+
+        elif method == "tools/call":
+            tool_name = params.get("name", "?")
+            args = params.get("arguments", {})
+            # Look up session info
+            sess = _sessions.get(session_id, _sessions.get(f"pending:{client_ip}", {}))
+            client_name = sess.get("client_name", "unknown")
+            client_log.info(
+                "TOOL CALL ip=%s client=%s session=%s tool=%s args=%s",
+                client_ip, client_name, session_id[:16] if session_id else "none",
+                tool_name, json.dumps(args, default=str)[:200],
+            )
+
+        elif method == "tools/list":
+            sess = _sessions.get(session_id, _sessions.get(f"pending:{client_ip}", {}))
+            client_name = sess.get("client_name", "unknown")
+            client_log.info(
+                "TOOLS LIST ip=%s client=%s session=%s",
+                client_ip, client_name, session_id[:16] if session_id else "none",
+            )
+
+        # Capture session ID from response headers to link to pending session
+        captured_session_id = None
+        original_send = send
+        async def send_wrapper(message):
+            nonlocal captured_session_id
+            if message["type"] == "http.response.start":
+                for name_bytes, val_bytes in message.get("headers", []):
+                    if name_bytes.lower() == b"mcp-session-id":
+                        captured_session_id = val_bytes.decode()
+                        # Move pending session to proper key
+                        pending_key = f"pending:{client_ip}"
+                        if pending_key in _sessions:
+                            _sessions[captured_session_id] = _sessions.pop(pending_key)
+                        break
+            return await original_send(message)
+
+        # Replay the buffered body
+        body_sent = False
+        async def replay_receive():
+            nonlocal body_sent
+            if not body_sent:
+                body_sent = True
+                return {"type": "http.request", "body": bytes(all_body), "more_body": False}
+            return await receive()
+
+        return await self.app(scope, replay_receive, send_wrapper)
 
 server = FastMCP(
     "molttravel",
@@ -453,4 +559,12 @@ else:
     log.info("GEMINI_API_KEY not set — travel_agent tool not registered")
 
 if __name__ == "__main__":
+    # Wrap the ASGI app with client tracking middleware
+    _original_streamable = server.streamable_http_app
+
+    def _wrapped_streamable():
+        app = _original_streamable()
+        return ClientTrackingMiddleware(app)
+
+    server.streamable_http_app = _wrapped_streamable
     server.run(transport="streamable-http")
