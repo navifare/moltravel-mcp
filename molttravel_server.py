@@ -82,9 +82,21 @@ class ClientTrackingMiddleware:
             method = ""
             params = {}
 
+        # Skip internal traffic (server talking to itself during startup)
+        INTERNAL_CLIENTS = {"molttravel", "molttravel-web"}
+
         if method == "initialize":
             client_info = params.get("clientInfo", {})
             client_name = client_info.get("name", "unknown")
+            if client_name in INTERNAL_CLIENTS:
+                body_sent = False
+                async def replay_receive():
+                    nonlocal body_sent
+                    if not body_sent:
+                        body_sent = True
+                        return {"type": "http.request", "body": bytes(all_body), "more_body": False}
+                    return await receive()
+                return await self.app(scope, replay_receive, send)
             client_version = client_info.get("version", "?")
             proto_version = params.get("protocolVersion", "?")
             client_log.info(
