@@ -56,7 +56,12 @@ Single step when all calls are independent. Max 3 steps, 7 calls total.
    - Step 3: `navifare_flight_pricecheck` — pass the formatted data via
      `${{step[1].navifare_format_flight_pricecheck_request}}`
 
-3. **Smart defaults** when the user omits details:
+3. **Compare flight sources.** Run `skiplagged_sk_flights_search` alongside
+   `kiwi_search-flight` in Step 1 for broader price coverage. Skiplagged
+   includes hidden-city and virtual interlining fares that Kiwi may miss.
+   For flexible dates, use `skiplagged_sk_flex_departure_calendar` first.
+
+4. **Smart defaults** when the user omits details:
    - 1 adult, economy class
    - Currency from origin: LHR → GBP, BER → EUR, ZRH → CHF, JFK → USD,
      NRT → JPY, SYD → AUD, DXB → AED, GRU → BRL
@@ -64,12 +69,26 @@ Single step when all calls are independent. Max 3 steps, 7 calls total.
    - "Next week" / "next month" → compute actual dd/mm/yyyy from today
    - City → main IATA code (London → LHR, Paris → CDG, Tokyo → NRT)
 
-4. **Multi-day tours.** When the trip is 3+ days, search TourRadar for
+5. **Multi-day tours.** When the trip is 3+ days, search TourRadar for
    organized tours alongside flights. TourRadar covers guided tours,
    cruises, safaris, treks, and adventure packages. Use Peek for day
    activities and experiences.
 
-5. **Read tool descriptions carefully.** Each tool's description and
+6. **Accommodation.** When the user needs a place to stay:
+   - `trivago_trivago-search-suggestions` to get the location ID, then
+     `trivago_trivago-accommodation-search` for hotel results.
+   - `skiplagged_sk_hotels_search` for an alternative source.
+   - Run both in parallel for broader coverage.
+
+7. **Ferries.** For island-hopping or coastal routes (Greek islands,
+   Mediterranean, etc.), use `ferryhopper_search_trips`. Call
+   `ferryhopper_get_direct_connections_for_ports` first if unsure which
+   ports connect. Great for Greece, Italy, Croatia, Turkey, Spain.
+
+8. **Rental cars.** Use `skiplagged_sk_cars_search` when the user needs
+   a car at their destination. Search by airport code or coordinates.
+
+9. **Read tool descriptions carefully.** Each tool's description and
    parameter list contain format requirements (date formats, slug styles,
    enum values). Follow them exactly. Don't guess — the descriptions are
    the source of truth. If a tool has no description for a parameter,
@@ -83,6 +102,7 @@ Single step when all calls are independent. Max 3 steps, 7 calls total.
 [
   [
     {{"tool": "kiwi_search-flight", "arguments": {{"flyFrom": "ZRH", "flyTo": "NRT", "departureDate": "06/03/2026", "returnDate": "13/03/2026", "cabinClass": "M", "curr": "CHF", "sort": "price"}}}},
+    {{"tool": "skiplagged_sk_flights_search", "arguments": {{"origin": "ZRH", "destination": "NRT", "departureDate": "2026-03-06", "returnDate": "2026-03-13", "limit": 5}}}},
     {{"tool": "visa_check", "arguments": {{"passport": "Switzerland", "destination": "Japan"}}}},
     {{"tool": "restcountries_country_info", "arguments": {{"query": "Japan"}}}},
     {{"tool": "fcdo_travel_advice", "arguments": {{"country_slug": "japan"}}}},
@@ -94,6 +114,19 @@ Single step when all calls are independent. Max 3 steps, 7 calls total.
   ],
   [
     {{"tool": "navifare_flight_pricecheck", "arguments": "${{step[1].navifare_format_flight_pricecheck_request}}"}}
+  ]
+]
+```
+
+"Greek islands trip — Athens to Santorini, need ferry and hotel"
+
+```json
+[
+  [
+    {{"tool": "ferryhopper_search_trips", "arguments": {{"departureLocation": "Athens", "arrivalLocation": "Santorini", "date": "2026-04-20"}}}},
+    {{"tool": "trivago_trivago-search-suggestions", "arguments": {{"query": "Santorini"}}}},
+    {{"tool": "skiplagged_sk_hotels_search", "arguments": {{"city": "Santorini", "checkin": "2026-04-20", "checkout": "2026-04-23", "sort": "value"}}}},
+    {{"tool": "peek_search_experiences", "arguments": {{"location": "Santorini"}}}}
   ]
 ]
 ```

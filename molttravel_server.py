@@ -223,7 +223,7 @@ server = FastMCP(
         "- `fcdo_travel_advice` — get UK FCDO travel advice for a specific country\n"
         "- `fcdo_list_countries` — list all countries with FCDO travel advice\n"
         "- `data_status` — check which static datasets are loaded\n\n"
-        "All tools are prefixed with their provider name (e.g. kiwi_, navifare_, tourradar_, peek_, restcountries_, fcdo_).\n\n"
+        "All tools are prefixed with their provider name (e.g. kiwi_, navifare_, skiplagged_, trivago_, ferryhopper_, tourradar_, peek_, restcountries_, fcdo_).\n\n"
         "Master tool:\n"
         "- `travel_agent` — ask any travel question in natural language and it will "
         "automatically route to the right tools and return a combined answer."
