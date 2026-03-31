@@ -10,4 +10,5 @@ MCP_PROVIDERS = {
     "peek": McpClient("https://mcp.peek.com/mcp"),
     "tourradar": McpClient("https://ai.tourradar.com/mcp/main"),
     "lastminute": McpClient("https://mcp.lastminute.com/mcp"),
+    "trivago": McpClient("https://mcp.trivago.com/mcp"),
 }
