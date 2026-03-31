@@ -11,4 +11,5 @@ MCP_PROVIDERS = {
     "tourradar": McpClient("https://ai.tourradar.com/mcp/main"),
     "lastminute": McpClient("https://mcp.lastminute.com/mcp"),
     "trivago": McpClient("https://mcp.trivago.com/mcp"),
+    "skiplagged": McpClient("https://mcp.skiplagged.com/mcp"),
 }
