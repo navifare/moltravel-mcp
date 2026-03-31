@@ -245,12 +245,19 @@ server = FastMCP(
 
 
 def _extract_text(result: dict) -> str:
-    """Pull text content out of an MCP tool result."""
-    content = result.get("result", {}).get("content", [])
+    """Pull text content out of an MCP tool result, including structuredContent."""
+    inner = result.get("result", {})
+    content = inner.get("content", [])
     parts = []
     for item in content:
         if item.get("type") == "text":
             parts.append(item["text"])
+
+    # Some servers (e.g. Ferryhopper) return data in structuredContent
+    structured = inner.get("structuredContent")
+    if structured:
+        parts.append(json.dumps(structured, indent=2))
+
     return "\n".join(parts) if parts else json.dumps(result, indent=2)
 
 
