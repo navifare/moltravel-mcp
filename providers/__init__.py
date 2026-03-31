@@ -12,4 +12,5 @@ MCP_PROVIDERS = {
     "lastminute": McpClient("https://mcp.lastminute.com/mcp"),
     "trivago": McpClient("https://mcp.trivago.com/mcp"),
     "skiplagged": McpClient("https://mcp.skiplagged.com/mcp"),
+    "ferryhopper": McpClient("https://mcp.ferryhopper.com/mcp"),
 }
