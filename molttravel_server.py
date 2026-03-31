@@ -52,6 +52,19 @@ class ClientTrackingMiddleware:
         if path.startswith("/analytics"):
             return await handle_dashboard_request(scope, receive, send)
 
+        # Serve /.well-known/glama.json for Glama ownership verification
+        if path == "/.well-known/glama.json" and scope["method"] == "GET":
+            body = json.dumps({
+                "$schema": "https://glama.ai/mcp/schemas/connector.json",
+                "maintainers": [{"email": "simone@navifare.com"}]
+            }).encode()
+            await send({"type": "http.response.start", "status": 200, "headers": [
+                [b"content-type", b"application/json"],
+                [b"content-length", str(len(body)).encode()],
+            ]})
+            await send({"type": "http.response.body", "body": body})
+            return
+
         if scope["method"] != "POST":
             return await self.app(scope, receive, send)
 
