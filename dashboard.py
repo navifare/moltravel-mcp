@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 from datetime import datetime, timedelta, timezone
 
 log = logging.getLogger("molttravel.dashboard")
@@ -11,15 +12,42 @@ log = logging.getLogger("molttravel.dashboard")
 DASHBOARD_KEY = os.environ.get("DASHBOARD_KEY", "")
 DATABASE_URL = os.environ.get("ANALYTICS_DATABASE_URL", "")
 
+# How long to stop retrying after a failed connection attempt. Analytics is
+# best-effort telemetry; if the DB is gone (e.g. an expired free instance) we
+# back off instead of re-resolving/re-connecting on every single request.
+_POOL_RETRY_COOLDOWN = 60.0
+
 _pool = None
+_pool_lock = asyncio.Lock()
+_pool_retry_after = 0.0
 
 
 async def get_pool():
-    global _pool
-    if _pool is None and DATABASE_URL:
+    global _pool, _pool_retry_after
+    if _pool is not None:
+        return _pool
+    if not DATABASE_URL:
+        return None
+    async with _pool_lock:
+        # Re-check under the lock: a concurrent caller may have built the pool
+        # (or just tripped the cooldown) while we were waiting.
+        if _pool is not None:
+            return _pool
+        if _pool_retry_after and time.monotonic() < _pool_retry_after:
+            return None
         import asyncpg
-        _pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=3)
-        await _init_schema()
+        try:
+            _pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=3)
+            await _init_schema()
+            _pool_retry_after = 0.0
+        except Exception as e:
+            _pool = None
+            _pool_retry_after = time.monotonic() + _POOL_RETRY_COOLDOWN
+            log.warning(
+                "Analytics DB unavailable, pausing analytics for %ds: %s",
+                int(_POOL_RETRY_COOLDOWN), e,
+            )
+            return None
     return _pool
 
 
@@ -60,10 +88,10 @@ async def record_event(
     tool_args: dict | None = None,
     protocol_version: str = "",
 ):
-    pool = await get_pool()
-    if not pool:
-        return
     try:
+        pool = await get_pool()
+        if not pool:
+            return
         async with pool.acquire() as conn:
             await conn.execute(
                 """INSERT INTO client_events
