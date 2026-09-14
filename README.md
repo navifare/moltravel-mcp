@@ -2,6 +2,8 @@
 
 # MoltTravel
 
+[![MCP Queen operational grade](https://mcpqueen.com/badge/com.moltravel/travel.svg)](https://mcpqueen.com/s/com.moltravel/travel)
+
 **One MCP server. Every travel tool.**
 
 Search flights, compare prices, check visas, look up airports,<br>
